@@ -1,0 +1,119 @@
+name: 'Markdown Checker'
+description: "Validates each platform file's own markup syntax, and can auto-generate all 3 changelog formats from one CHANGELOG.md source."
+author: 'MPHONlC'
+branding:
+  icon: 'check-square'
+  color: 'blue'
+
+inputs:
+  bbcode_readme:
+    description: 'Path to the BBCode-forum description file - leave blank to auto-detect README_BBCODE.txt or README_ESOUI.txt'
+    required: false
+    default: ''
+  bbcode_changelog:
+    description: 'Path to the BBCode-forum changelog file - leave blank to auto-detect CHANGELOG_BBCODE.txt or CHANGELOG_ESOUI.txt'
+    required: false
+    default: ''
+  github_readme:
+    description: 'Path to the GitHub Flavored Markdown description file (this is GitHub''s own required filename, not auto-detected)'
+    required: false
+    default: 'README.md'
+  github_changelog:
+    description: 'Path to the GitHub Flavored Markdown changelog file - leave blank to auto-detect CHANGELOG_GFM.txt or CHANGELOG_GITHUB.txt (any case)'
+    required: false
+    default: ''
+  bethesda_readme:
+    description: 'Path to the Bethesda (CommonMark) description file - leave blank to auto-detect README_COMMONMARK/PLAINMARKDOWN/BETHESDA.txt (any case)'
+    required: false
+    default: ''
+  bethesda_changelog:
+    description: 'Path to the Bethesda (CommonMark) changelog file - leave blank to auto-detect CHANGELOG_COMMONMARK/PLAINMARKDOWN/BETHESDA.txt (any case)'
+    required: false
+    default: ''
+  mode:
+    description: "'validate' or 'regenerate' (requires version to be set)"
+    required: false
+    default: 'validate'
+  canonical_changelog:
+    description: 'CHANGELOG.md source used for regenerate mode'
+    required: false
+    default: 'CHANGELOG.md'
+  version:
+    description: 'Version to extract from canonical_changelog, required when mode is regenerate'
+    required: false
+    default: ''
+  libraries:
+    description: 'Comma-separated list of known library names to highlight'
+    required: false
+    default: ''
+  terms_file:
+    description: 'Glossary file of "Term" or "Term:Color" lines to highlight during regenerate'
+    required: false
+    default: '.github/changelog-highlight-terms.txt'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve platform file names
+      shell: bash
+      run: |
+        resolve_file() {
+          local explicit="$1" prefix="$2"
+          shift 2
+          if [ -n "$explicit" ]; then
+            printf '%s\n' "$explicit"
+            return
+          fi
+          local alias match
+          for alias in "$@"; do
+            match=$(find . -maxdepth 1 -iname "${prefix}_${alias}.txt" -print -quit 2>/dev/null)
+            if [ -n "$match" ]; then
+              printf '%s\n' "${match#./}"
+              return
+            fi
+          done
+          printf '%s\n' "${prefix}_${1}.txt"
+        }
+
+        echo "BBCODE_README=$(resolve_file "${{ inputs.bbcode_readme }}" "README" "BBCODE" "ESOUI")" >> "$GITHUB_ENV"
+        echo "BBCODE_CHANGELOG=$(resolve_file "${{ inputs.bbcode_changelog }}" "CHANGELOG" "BBCODE" "ESOUI")" >> "$GITHUB_ENV"
+        echo "GITHUB_CHANGELOG=$(resolve_file "${{ inputs.github_changelog }}" "CHANGELOG" "GFM" "GITHUB")" >> "$GITHUB_ENV"
+        echo "BETHESDA_README=$(resolve_file "${{ inputs.bethesda_readme }}" "README" "COMMONMARK" "PLAINMARKDOWN" "BETHESDA")" >> "$GITHUB_ENV"
+        echo "BETHESDA_CHANGELOG=$(resolve_file "${{ inputs.bethesda_changelog }}" "CHANGELOG" "COMMONMARK" "PLAINMARKDOWN" "BETHESDA")" >> "$GITHUB_ENV"
+
+    - name: Validate each file's own markup
+      shell: bash
+      run: |
+        python3 "${{ github.action_path }}/markdown_lint.py" \
+          "$BBCODE_README:bbcode" \
+          "$BBCODE_CHANGELOG:bbcode" \
+          "${{ inputs.github_readme }}:github" \
+          "$GITHUB_CHANGELOG:github" \
+          "$BETHESDA_README:plain" \
+          "$BETHESDA_CHANGELOG:plain" \
+          | tee -a "$GITHUB_STEP_SUMMARY"
+
+    - name: Auto-generate changelog entries from canonical source
+      if: inputs.mode == 'regenerate'
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.version }}" ]; then
+          echo "::error::mode is 'regenerate' but no 'version' input was given."
+          exit 1
+        fi
+        LIB_ARGS=""
+        if [ -n "${{ inputs.libraries }}" ]; then
+          IFS=',' read -ra LIBS <<< "${{ inputs.libraries }}"
+          for lib in "${LIBS[@]}"; do
+            LIB_ARGS="$LIB_ARGS --library $lib"
+          done
+        fi
+        python3 "${{ github.action_path }}/generate_changelog.py" \
+          --changelog-md "${{ inputs.canonical_changelog }}" \
+          --version "${{ inputs.version }}" \
+          $LIB_ARGS \
+          --terms-file "${{ inputs.terms_file }}" \
+          --out-bbcode "$BBCODE_CHANGELOG" \
+          --out-github "$GITHUB_CHANGELOG" \
+          --out-bethesda "$BETHESDA_CHANGELOG" \
+          | tee -a "$GITHUB_STEP_SUMMARY"
